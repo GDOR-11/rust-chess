@@ -1,4 +1,4 @@
-use crate::pieces::{Piece, Color};
+use crate::pieces::{Piece, Color, PieceType};
 use std::fmt::{Display, Formatter, Error};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -45,7 +45,9 @@ fn coordinate_from_string() {
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum SpecialMove {
     EnPassant,
-    Castling
+    Castling,
+    TwoSquareAdvance,
+    Promotion(PieceType)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -56,8 +58,21 @@ pub struct Move {
 }
 
 impl Move {
-    pub fn new(from: Coordinate, to: Coordinate, special_move: Option<SpecialMove>) -> Self {
+    pub fn new(from_x: u8, from_y: u8, to_x: u8, to_y: u8, special_move: Option<SpecialMove>) -> Self {
+        Self { from: Coordinate::new(from_x, from_y), to: Coordinate::new(to_x, to_y), special_move }
+    }
+    pub fn from_coordinates(from: Coordinate, to: Coordinate, special_move: Option<SpecialMove>) -> Self {
         Self { from, to, special_move }
+    }
+    pub fn to_string(&self) -> String {
+        let mut s = self.from.to_string();
+        s.push_str(&self.to.to_string());
+        s
+    }
+    pub fn from_string(string: &str, special_move: Option<SpecialMove>) -> Option<Self> {
+        if string.len() != 4 { return None; }
+        let coords = string.split_at(2);
+        Some(Self::from_coordinates(Coordinate::from_string(coords.0)?, Coordinate::from_string(coords.1)?, special_move))
     }
 }
 impl Display for Move {
@@ -82,8 +97,8 @@ pub struct Chessboard {
     halfmove_clock: u8,
     /** amount of moves since the start of the match */
     pub move_number: u16,
-    /** all the states since an irreversible move has been made, in order to account for the 3 move rule */
-    previous_states: Vec<[u32; 8]>
+    /** all the positions (state, to play) since an irreversible move has been made, in order to account for the 3 move rule */
+    previous_states: Vec<([u32; 8], Color)>
 }
 impl Default for Chessboard {
     fn default() -> Self {
@@ -100,7 +115,7 @@ impl Default for Chessboard {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct OutsideOfChessboard;
 
 impl Chessboard {
@@ -160,8 +175,8 @@ impl Chessboard {
             let coordinate = Coordinate::from_string(&coordinate_string)?;
             let (x, y) = (coordinate.x, coordinate.y);
             match y {
-                4 => chessboard.last_move = Some(Move::new(Coordinate::new(x, 2), coordinate, Some(SpecialMove::EnPassant))),
-                5 => chessboard.last_move = Some(Move::new(Coordinate::new(x, 7), coordinate, Some(SpecialMove::EnPassant))),
+                4 => chessboard.last_move = Some(Move::new(x, 2, x, y, Some(SpecialMove::EnPassant))),
+                5 => chessboard.last_move = Some(Move::new(x, 7, x, y, Some(SpecialMove::EnPassant))),
                 _ => return None
             }
         }
@@ -219,19 +234,58 @@ impl Chessboard {
     }
 
     /**
-        make the move without checking if it's valid. To check for validity, use Chessboard::get_legal_moves. Returns the captured piece if there was any.
+        make the move without checking if it's valid. To check for validity, use Chessboard::get_legal_moves. Returns the moved and the captured piece if there were any.
     */
-    pub fn make_move(&mut self, r#move: Move) -> Result<Option<Piece>, OutsideOfChessboard> {
+    pub fn make_move(&mut self, r#move: Move) -> (Piece, Option<Piece>) {
         println!("(castling too) IMPLEMENT EN PASSANT IMPLEMENT EN PASSANT IMPLEMENT EN PASSANT IMPLEMENT EN PASSANT (Chessboard::make_move)");
 
-        let piece = self.get(r#move.from.x, r#move.from.y)?;
-        let captured = self.get(r#move.to.x, r#move.to.y)?;
+        let moved = self.get(r#move.from.x, r#move.from.y).expect(&format!("invalid move, move.from = ({}, {})", r#move.from.x, r#move.from.y)).expect("there was no piece to be moved");
+        let captured = self.get(r#move.to.x, r#move.to.y).expect(&format!("invalid move, move.to = ({}, {})", r#move.to.x, r#move.to.y));
 
-        self.set(r#move.from.x, r#move.from.y, None).unwrap();
-        self.set(r#move.to.x, r#move.to.y, piece).unwrap();
         self.to_play = self.to_play.opposite();
 
-        return Ok(captured);
+        let mut irreversible = false;
+
+        // if en passant was avaible, the move is irreversible
+        if let Some(last_move) = self.last_move {
+            if last_move.special_move == Some(SpecialMove::TwoSquareAdvance) && (
+                self.get(last_move.to.x - 1, last_move.to.y).is_ok_and(|piece| piece == Some(Piece::new(self.to_play, PieceType::Pawn))) ||
+                self.get(last_move.to.x - 1, last_move.to.y).is_ok_and(|piece| piece == Some(Piece::new(self.to_play, PieceType::Pawn)))
+            ) {
+                irreversible = true;
+            }
+        }
+
+        // if a pawn was moved or if a player lost castling rights, the move is irreversible
+        match (moved.piece_type, moved.color) {
+            (PieceType::Pawn, _) => irreversible = true,
+            (PieceType::King, Color::White) => {
+                if self.castling[0] || self.castling[1] { irreversible = true; }
+                self.castling[0] = false;
+                self.castling[1] = false;
+            },
+            (PieceType::King, Color::Black) => {
+                if self.castling[2] || self.castling[3] { irreversible = true; }
+                self.castling[2] = false;
+                self.castling[3] = false;
+            },
+            (PieceType::Rook, Color::White) => {
+                if self.castling[0] && r#move.from == Coordinate::new(7, 0) { irreversible = true; self.castling[0] = false; }
+                if self.castling[1] && r#move.from == Coordinate::new(0, 0) { irreversible = true; self.castling[1] = false; }
+            },
+            (PieceType::Rook, Color::Black) => {
+                if self.castling[2] && r#move.from == Coordinate::new(7, 7) { irreversible = true; self.castling[2] = false; }
+                if self.castling[3] && r#move.from == Coordinate::new(0, 7) { irreversible = true; self.castling[3] = false; }
+            }
+            _ => ()
+        }
+
+        self.set(r#move.from.x, r#move.from.y, None).unwrap();
+        self.set(r#move.to.x, r#move.to.y, Some(moved)).unwrap();
+
+        if irreversible { self.previous_states.clear(); } else { self.previous_states.push((self.state, self.to_play)) }
+
+        (moved, captured)
     }
 
     pub fn get_legal_moves(&self) -> Vec<Move> {
@@ -247,21 +301,27 @@ impl Chessboard {
 
         moves
     }
+
+    pub fn is_legal_move(&self, r#move: Move) -> Result<bool, OutsideOfChessboard> {
+        Ok(self.get(r#move.from.x, r#move.from.y)?.map(|piece| piece.color == self.to_play && piece.is_legal_move(r#move, self)).unwrap_or(false))
+    }
 }
 
 impl Display for Chessboard {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error> {
         for y in (0..8).rev() {
+            write!(f, "+---+---+---+---+---+---+---+---+\n")?;
             for x in 0..8 {
                 if let Some(piece) = self.get(x, y).expect("DONT MESS WITH THE CODE") {
-                    write!(f, "{piece}")?;
+                    write!(f, "| {piece} ")?;
                 } else {
-                    write!(f, " ")?;
+                    write!(f, "|   ")?;
                 }
-                if x != 7 { write!(f, " ")?; }
+                if x == 7 { write!(f, "| {}", y + 1)?; }
             }
-            if y != 0 { write!(f, "\n")?; }
+            write!(f, "\n")?;
         }
+        write!(f, "+---+---+---+---+---+---+---+---+\n  a   b   c   d   e   f   g   h")?;
         Ok(())
     }
 }
